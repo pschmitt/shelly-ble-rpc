@@ -151,24 +151,41 @@ def paired_label(value: bool | None) -> str:
     return "unknown"
 
 
-async def resolve_device_name(
-    address: str, timeout: float
-) -> str | None:
-    request, payload = build_request("Sys.GetConfig", None)
+async def rpc_result(
+    address: str, method: str, timeout: float
+) -> dict[str, Any] | None:
+    request, payload = build_request(method, None)
     try:
         response = await call_rpc(address, request, payload, timeout)
     except (BleakError, OSError, ShellyBleRpcError, asyncio.TimeoutError) as exc:
-        LOG.debug("Could not resolve the configured name for %s: %s", address, exc)
+        LOG.debug("Could not query %s on %s: %s", method, address, exc)
         return None
 
     result = response.get("result")
-    if not isinstance(result, dict):
-        return None
-    device = result.get("device")
-    if not isinstance(device, dict):
-        return None
-    name = device.get("name")
-    return name.strip() if isinstance(name, str) and name.strip() else None
+    return result if isinstance(result, dict) else None
+
+
+async def resolve_device_info(address: str, timeout: float) -> dict[str, str]:
+    """Resolve the configured name and hardware model over RPC."""
+    info: dict[str, str] = {}
+    result = await rpc_result(address, "Shelly.GetDeviceInfo", timeout)
+    if result is not None:
+        name = result.get("name")
+        model = result.get("model")
+        if isinstance(name, str) and name.strip():
+            info["name"] = name.strip()
+        if isinstance(model, str) and model.strip():
+            info["type"] = model.strip()
+
+    # Older firmware may expose the configured name only through Sys.GetConfig.
+    if "name" not in info:
+        result = await rpc_result(address, "Sys.GetConfig", timeout)
+        device = result.get("device") if result is not None else None
+        if isinstance(device, dict):
+            name = device.get("name")
+            if isinstance(name, str) and name.strip():
+                info["name"] = name.strip()
+    return info
 
 
 def locally_paired(device: Any) -> bool | None:
@@ -245,6 +262,7 @@ async def list_paired_shelly_devices() -> list[dict[str, str]]:
                 {
                     "address": address,
                     "name": str(name),
+                    "type": "unknown",
                     "rssi": str(device.get("RSSI", "unknown")),
                     "rpc": (
                         "yes"
@@ -281,6 +299,7 @@ async def scan_shelly_devices(
         row = {
             "address": address,
             "name": name,
+            "type": "unknown",
             "rssi": str(advertisement.rssi),
             "paired": paired_label(locally_paired(device)),
             "rpc": (
@@ -290,63 +309,71 @@ async def scan_shelly_devices(
         rows.append(row)
 
     if resolve_names:
-        semaphore = asyncio.Semaphore(concurrency)
-
-        def eligible_for_name_lookup(row: dict[str, str]) -> bool:
-            if not (
-                row["name"].lower().startswith("shelly") or row["rpc"] == "yes"
-            ):
-                return False
-            if not force and row["paired"] != "yes":
-                LOG.debug(
-                    "Skipping name lookup for %s: device is not locally paired "
-                    "(use --force to connect anyway)",
-                    row["address"],
-                )
-                return False
-            return True
-
-        async def resolve_row(row: dict[str, str]) -> bool:
-            if not eligible_for_name_lookup(row):
-                return False
-            async with semaphore:
-                resolved_name = await resolve_device_name(
-                    row["address"], min(timeout, 3.0)
-                )
-            if resolved_name:
-                row["name"] = resolved_name
-                return True
-            return False
-
-        results = await asyncio.gather(*(resolve_row(row) for row in rows))
-        retry_rows = [
-            row
-            for row, resolved in zip(rows, results)
-            if not resolved and eligible_for_name_lookup(row)
-        ]
-        if retry_rows:
-            LOG.debug(
-                "Retrying %d unresolved name lookup(s) serially", len(retry_rows)
-            )
-            for row in retry_rows:
-                for attempt in range(1, NAME_LOOKUP_RETRIES + 1):
-                    resolved_name = await resolve_device_name(
-                        row["address"], min(timeout, 3.0)
-                    )
-                    if resolved_name:
-                        row["name"] = resolved_name
-                        break
-                    if attempt < NAME_LOOKUP_RETRIES:
-                        LOG.debug(
-                            "Name lookup retry %d/%d for %s in %.1f seconds",
-                            attempt,
-                            NAME_LOOKUP_RETRIES,
-                            row["address"],
-                            NAME_LOOKUP_RETRY_DELAY,
-                        )
-                        await asyncio.sleep(NAME_LOOKUP_RETRY_DELAY)
+        await resolve_device_info_rows(
+            rows, timeout, concurrency=concurrency, force=force
+        )
 
     return sorted(rows, key=lambda row: (row["name"].lower(), row["address"].lower()))
+
+
+async def resolve_device_info_rows(
+    rows: list[dict[str, str]],
+    timeout: float,
+    *,
+    concurrency: int,
+    force: bool,
+) -> None:
+    semaphore = asyncio.Semaphore(concurrency)
+
+    def eligible_for_lookup(row: dict[str, str]) -> bool:
+        if not (
+            row["name"].lower().startswith("shelly") or row["rpc"] == "yes"
+        ):
+            return False
+        if not force and row["paired"] != "yes":
+            LOG.debug(
+                "Skipping device info lookup for %s: device is not locally paired "
+                "(use --force to connect anyway)",
+                row["address"],
+            )
+            return False
+        return True
+
+    async def resolve_row(row: dict[str, str]) -> bool:
+        if not eligible_for_lookup(row):
+            return False
+        async with semaphore:
+            info = await resolve_device_info(row["address"], min(timeout, 3.0))
+        row.update(info)
+        return "name" in info and "type" in info
+
+    results = await asyncio.gather(*(resolve_row(row) for row in rows))
+    retry_rows = [
+        row
+        for row, resolved in zip(rows, results)
+        if not resolved and eligible_for_lookup(row)
+    ]
+    if not retry_rows:
+        return
+
+    LOG.debug(
+        "Retrying %d unresolved device info lookup(s) serially", len(retry_rows)
+    )
+    for row in retry_rows:
+        for attempt in range(1, NAME_LOOKUP_RETRIES + 1):
+            info = await resolve_device_info(row["address"], min(timeout, 3.0))
+            row.update(info)
+            if "name" in info and "type" in info:
+                break
+            if attempt < NAME_LOOKUP_RETRIES:
+                LOG.debug(
+                    "Device info lookup retry %d/%d for %s in %.1f seconds",
+                    attempt,
+                    NAME_LOOKUP_RETRIES,
+                    row["address"],
+                    NAME_LOOKUP_RETRY_DELAY,
+                )
+                await asyncio.sleep(NAME_LOOKUP_RETRY_DELAY)
 
 
 def print_scan_results(
@@ -356,9 +383,9 @@ def print_scan_results(
     json_output: bool = False,
     include_radio: bool = True,
 ) -> None:
-    fields = ("address", "name", "rssi", "rpc", "paired")
+    fields = ("address", "name", "type", "rssi", "rpc", "paired")
     if not include_radio:
-        fields = ("address", "name", "paired")
+        fields = ("address", "name", "type", "paired")
     if json_output:
         print(
             json.dumps(
@@ -390,12 +417,13 @@ def print_scan_results(
     )
     table.add_column("ADDRESS", style="cyan", no_wrap=True)
     table.add_column("NAME", style="green")
+    table.add_column("TYPE", style="green")
     if include_radio:
         table.add_column("RSSI", style="magenta")
         table.add_column("RPC", style="white")
     table.add_column("PAIRED", style="white")
     for row in rows:
-        values = [row["address"], row["name"]]
+        values = [row["address"], row["name"], row["type"]]
         if include_radio:
             values.extend((row["rssi"], status_cell(row["rpc"])))
         values.append(status_cell(row["paired"]))
@@ -781,7 +809,7 @@ def argument_parser() -> argparse.ArgumentParser:
     scan_parser = actions.add_parser(
         "scan",
         help="list nearby Shelly BLE devices",
-        description="List nearby Shelly BLE devices as a tsvtool-style table or TSV.",
+        description="List nearby Shelly BLE devices as a table, TSV, or JSON.",
         formatter_class=RichHelpFormatter,
     )
     scan_parser.add_argument(
@@ -826,8 +854,25 @@ def argument_parser() -> argparse.ArgumentParser:
     paired_parser = actions.add_parser(
         "paired",
         help="list paired Shelly BLE devices",
-        description="List paired Shelly BLE devices from the local Linux/BlueZ bond database.",
+        description="List paired Shelly BLE devices from the local Linux/BlueZ bond database as a table, TSV, or JSON.",
         formatter_class=RichHelpFormatter,
+    )
+    paired_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="query paired devices for configured names and hardware types",
+    )
+    paired_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help=f"connection and RPC timeout in seconds (default: {DEFAULT_TIMEOUT:g})",
+    )
+    paired_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="maximum parallel device info lookups in --full mode (default: 4)",
     )
     paired_output = paired_parser.add_mutually_exclusive_group()
     paired_output.add_argument(
@@ -933,7 +978,7 @@ def main() -> int:
     args = argument_parser().parse_args()
     if hasattr(args, "timeout") and args.timeout <= 0:
         argument_parser().error("--timeout must be greater than zero")
-    if args.action == "scan" and args.concurrency <= 0:
+    if args.action in ("scan", "paired") and args.concurrency <= 0:
         argument_parser().error("--concurrency must be greater than zero")
 
     logging.basicConfig(
@@ -970,6 +1015,20 @@ def main() -> int:
         except (BleakError, OSError, ShellyBleRpcError) as exc:
             LOG.error("Could not list paired Shelly BLE devices: %s", exc)
             return 1
+        if args.full:
+            try:
+                asyncio.run(
+                    resolve_device_info_rows(
+                        rows,
+                        args.timeout,
+                        concurrency=args.concurrency,
+                        force=False,
+                    )
+                )
+            except (BleakError, OSError, ShellyBleRpcError) as exc:
+                LOG.error("Could not resolve paired device info: %s", exc)
+                return 1
+            rows.sort(key=lambda row: (row["name"].lower(), row["address"].lower()))
         print_scan_results(
             rows, tsv=args.tsv, json_output=args.json, include_radio=False
         )

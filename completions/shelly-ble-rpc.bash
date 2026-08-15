@@ -72,7 +72,7 @@ _shelly_ble_rpc_completions() {
             options=(-d --debug --tsv --json --full --force --timeout --concurrency)
             ;;
         paired)
-            options=(-d --debug --tsv --json)
+            options=(-d --debug --tsv --json --full --timeout --concurrency)
             ;;
         rpc)
             options=(-d --debug --raw --timeout)

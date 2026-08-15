@@ -19,6 +19,7 @@ uv run shelly_ble_rpc.py scan --full --force
 uv run shelly_ble_rpc.py scan --tsv
 uv run shelly_ble_rpc.py scan --json
 uv run shelly_ble_rpc.py paired
+uv run shelly_ble_rpc.py paired --full
 uv run shelly_ble_rpc.py paired --json
 ./shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 
@@ -43,20 +44,20 @@ The response frame is printed as formatted JSON. A device-side RPC error is
 printed and returns a non-zero exit status.
 
 `scan` prints a colored Rich table with one row per discovered Shelly device
-(`ADDRESS`, advertised `NAME`, `RSSI`, whether `RPC` was advertised, and local
-`PAIRED` state). Status values such as `yes`, `no`, and `unknown` are colored
-semantically. Use
-`scan --full` to additionally make best-effort read-only `Sys.GetConfig`
-requests for configured human-readable names. Full-mode lookups run in
-parallel, capped at four connections by default; adjust this with
-`--concurrency` if needed. By default, full mode connects only to devices that
-the local Bluetooth backend reports as paired; use `scan --full --force` to
-allow connections to unpaired or unknown devices.
+(`ADDRESS`, advertised `NAME`, `TYPE`, `RSSI`, whether `RPC` was advertised,
+and local `PAIRED` state). Status values such as `yes`, `no`, and `unknown` are
+colored semantically. Use `scan --full` to additionally make best-effort
+read-only RPC requests for configured human-readable names and hardware model
+types. Full-mode lookups run in parallel, capped at four connections by
+default; adjust this with `--concurrency` if needed. By default, full mode
+connects only to devices that the local Bluetooth backend reports as paired;
+use `scan --full --force` to allow connections to unpaired or unknown devices.
 
 Use `paired` to list all locally bonded Shelly devices, including devices that
 are not currently advertising. This command currently uses the Linux/BlueZ
 bond database and prints only the address, cached device name, and paired
-state.
+state, plus a `TYPE` column. Use `paired --full` to resolve the configured
+device name and hardware model over BLE for each paired device.
 
 Use the separate `pair ADDRESS_OR_NAME` action when the device requires BLE
 bonding; it accepts a MAC address in any letter case or the advertised device

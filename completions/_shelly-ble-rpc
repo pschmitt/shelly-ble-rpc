@@ -103,6 +103,9 @@ _shelly_ble_rpc() {
             _arguments \
                 '--tsv[emit raw tab-separated values]' \
                 '--json[emit formatted JSON]' \
+                '--full[resolve configured names and hardware types]' \
+                '--timeout[connection and RPC timeout]:seconds:' \
+                '--concurrency[parallel device info lookups]:connections:' \
                 '(-d --debug)'{-d,--debug}'[enable debug logging]'
             ;;
     esac
