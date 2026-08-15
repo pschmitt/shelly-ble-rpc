@@ -338,7 +338,7 @@ async def call_rpc(
 
 
 async def pair_device(address: str, timeout: float) -> None:
-    target = await resolve_pair_target(address, timeout)
+    target = await resolve_device_target(address, timeout)
     target_address = getattr(target, "address", target)
     pairing_agent = await register_pairing_agent(str(target_address))
     client: BleakClient | None = None
@@ -368,8 +368,24 @@ def normalized_mac_address(value: str) -> str:
     return value.upper()
 
 
-async def resolve_pair_target(identifier: str, timeout: float) -> Any:
-    """Resolve a pair action's MAC address or advertised device name."""
+async def unpair_device(address: str, timeout: float) -> None:
+    target = await resolve_device_target(address, timeout)
+    client = BleakClient(target, timeout=timeout)
+    try:
+        LOG.info("Unpairing %s", address)
+        await client.unpair()
+        LOG.info("Unpairing completed for %s", address)
+    finally:
+        if client.is_connected:
+            LOG.debug("Disconnecting from %s", address)
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001 - cleanup must not hide the result
+                LOG.debug("BLE disconnect failed: %s", exc)
+
+
+async def resolve_device_target(identifier: str, timeout: float) -> Any:
+    """Resolve a device action's MAC address or advertised device name."""
     if is_mac_address(identifier):
         return normalized_mac_address(identifier)
 
@@ -610,6 +626,27 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable BLE pairing debug logging",
     )
+    unpair_parser = actions.add_parser(
+        "unpair",
+        help="remove a BLE device bond",
+        description="Remove the local BLE bond for a device by MAC address or advertised name.",
+        formatter_class=RichHelpFormatter,
+    )
+    unpair_parser.add_argument(
+        "address", help="BLE MAC address (any letter case) or advertised device name"
+    )
+    unpair_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT,
+        help=f"device lookup timeout in seconds (default: {DEFAULT_TIMEOUT:g})",
+    )
+    unpair_parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="enable BLE unpairing debug logging",
+    )
     return parser
 
 
@@ -652,6 +689,20 @@ def main() -> int:
             return 1
         except (BleakError, OSError, ShellyBleRpcError) as exc:
             LOG.error("BLE pairing failed: %s", exc)
+            return 1
+        return 0
+
+    if args.action == "unpair":
+        try:
+            asyncio.run(unpair_device(args.address, args.timeout))
+        except asyncio.TimeoutError:
+            LOG.error("Timed out after %.1f seconds while unpairing", args.timeout)
+            return 1
+        except NotImplementedError:
+            LOG.error("BLE unpairing is not supported by this platform/backend")
+            return 1
+        except (BleakError, OSError, ShellyBleRpcError) as exc:
+            LOG.error("BLE unpairing failed: %s", exc)
             return 1
         return 0
 

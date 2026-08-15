@@ -8,6 +8,7 @@ using [bleak](https://bleak.readthedocs.io/).
 ```console
 uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 uv run shelly_ble_rpc.py pair E8:F6:0A:66:D3:92
+uv run shelly_ble_rpc.py unpair E8:F6:0A:66:D3:92
 uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Switch.Set '{"id":0,"on":true}'
 uv run shelly_ble_rpc.py rpc --debug E8:F6:0A:66:D3:92 Shelly.GetDeviceInfo
 uv run shelly_ble_rpc.py scan --timeout 5
@@ -17,6 +18,7 @@ uv run shelly_ble_rpc.py scan --tsv
 
 nix develop
 nix run . -- pair E8:F6:0A:66:D3:92
+nix run . -- unpair E8:F6:0A:66:D3:92
 nix run . -- rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 nix run . -- scan
 ```
@@ -38,6 +40,8 @@ bonding; it accepts a MAC address in any letter case or the advertised device
 name, then pairs and disconnects. Afterwards, `rpc` and `scan --full` can use
 the established bond. Pairing may require platform interaction such as
 entering a PIN.
+Use `unpair ADDRESS_OR_NAME` to remove the local bond. Unpairing is supported
+by Bleak on Linux and Windows.
 Use `--tsv` for a clean tab-separated header and rows suitable for piping into
 a table viewer such as `tv`/`tvtool`.
 
