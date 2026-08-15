@@ -350,11 +350,24 @@ async def scan_shelly_devices(
 
 
 def print_scan_results(
-    rows: list[dict[str, str]], *, tsv: bool, include_radio: bool = True
+    rows: list[dict[str, str]],
+    *,
+    tsv: bool,
+    json_output: bool = False,
+    include_radio: bool = True,
 ) -> None:
     fields = ("address", "name", "rssi", "rpc", "paired")
     if not include_radio:
         fields = ("address", "name", "paired")
+    if json_output:
+        print(
+            json.dumps(
+                [{field: row[field] for field in fields} for row in rows],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
     headers = tuple(field.upper() for field in fields)
     if tsv:
         print("\t".join(headers))
@@ -783,10 +796,16 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable BLE scanner debug logging",
     )
-    scan_parser.add_argument(
+    scan_output = scan_parser.add_mutually_exclusive_group()
+    scan_output.add_argument(
         "--tsv",
         action="store_true",
         help="emit raw tab-separated values instead of the colored table",
+    )
+    scan_output.add_argument(
+        "--json",
+        action="store_true",
+        help="emit formatted JSON instead of the colored table",
     )
     scan_parser.add_argument(
         "--full",
@@ -810,10 +829,16 @@ def argument_parser() -> argparse.ArgumentParser:
         description="List paired Shelly BLE devices from the local Linux/BlueZ bond database.",
         formatter_class=RichHelpFormatter,
     )
-    paired_parser.add_argument(
+    paired_output = paired_parser.add_mutually_exclusive_group()
+    paired_output.add_argument(
         "--tsv",
         action="store_true",
         help="emit raw tab-separated values instead of the colored table",
+    )
+    paired_output.add_argument(
+        "--json",
+        action="store_true",
+        help="emit formatted JSON instead of the colored table",
     )
     paired_parser.add_argument(
         "-d",
@@ -931,7 +956,7 @@ def main() -> int:
         except (BleakError, OSError) as exc:
             LOG.error("BLE scan failed: %s", exc)
             return 1
-        print_scan_results(rows, tsv=args.tsv)
+        print_scan_results(rows, tsv=args.tsv, json_output=args.json)
         if not rows:
             LOG.info("No Shelly BLE devices found")
         return 0
@@ -945,7 +970,9 @@ def main() -> int:
         except (BleakError, OSError, ShellyBleRpcError) as exc:
             LOG.error("Could not list paired Shelly BLE devices: %s", exc)
             return 1
-        print_scan_results(rows, tsv=args.tsv, include_radio=False)
+        print_scan_results(
+            rows, tsv=args.tsv, json_output=args.json, include_radio=False
+        )
         if not rows:
             LOG.info("No paired Shelly BLE devices found")
         return 0

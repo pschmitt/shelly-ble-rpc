@@ -93,6 +93,7 @@ _shelly_ble_rpc() {
             _arguments \
                 '--timeout[scan duration]:seconds:' \
                 '--tsv[emit raw tab-separated values]' \
+                '--json[emit formatted JSON]' \
                 '--full[resolve configured device names]' \
                 '--force[connect to unpaired devices]' \
                 '--concurrency[parallel name lookups]:connections:' \
@@ -101,6 +102,7 @@ _shelly_ble_rpc() {
         paired)
             _arguments \
                 '--tsv[emit raw tab-separated values]' \
+                '--json[emit formatted JSON]' \
                 '(-d --debug)'{-d,--debug}'[enable debug logging]'
             ;;
     esac

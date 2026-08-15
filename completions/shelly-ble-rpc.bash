@@ -69,10 +69,10 @@ _shelly_ble_rpc_completions() {
 
     case "$action" in
         scan)
-            options=(-d --debug --tsv --full --force --timeout --concurrency)
+            options=(-d --debug --tsv --json --full --force --timeout --concurrency)
             ;;
         paired)
-            options=(-d --debug --tsv)
+            options=(-d --debug --tsv --json)
             ;;
         rpc)
             options=(-d --debug --raw --timeout)

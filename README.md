@@ -17,7 +17,9 @@ uv run shelly_ble_rpc.py scan --timeout 5
 uv run shelly_ble_rpc.py scan --full
 uv run shelly_ble_rpc.py scan --full --force
 uv run shelly_ble_rpc.py scan --tsv
+uv run shelly_ble_rpc.py scan --json
 uv run shelly_ble_rpc.py paired
+uv run shelly_ble_rpc.py paired --json
 ./shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 
 nix develop
@@ -64,7 +66,8 @@ entering a PIN.
 Use `unpair ADDRESS_OR_NAME` to remove the local bond. Unpairing is supported
 by Bleak on Linux and Windows.
 Use `--tsv` for a clean tab-separated header and rows suitable for piping into
-a table viewer such as `tv`/`tvtool`.
+a table viewer such as `tv`/`tvtool`, or `--json` for a formatted JSON array.
+These output modes are mutually exclusive.
 
 Shell completions are included for Bash and Zsh. Nix installs them
 automatically; for a checkout used directly with the Python entry point, source
