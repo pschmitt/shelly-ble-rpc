@@ -38,6 +38,20 @@ DEFAULT_TIMEOUT = 15.0
 REQUEST_ID = 1
 RPC_SOURCE = "shelly_ble_rpc"
 MAC_ADDRESS_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+NON_COMPONENT_NAMESPACES = {
+    "Auth",
+    "BLE",
+    "Cloud",
+    "KVS",
+    "MQTT",
+    "OTA",
+    "Schedule",
+    "Script",
+    "Shelly",
+    "Sys",
+    "Websocket",
+    "WiFi",
+}
 
 
 class ShellyBleRpcError(RuntimeError):
@@ -53,7 +67,34 @@ def parse_json_params(raw: str) -> Any:
         ) from exc
 
 
+def parse_raw_request(raw: str) -> dict[str, Any]:
+    value = parse_json_params(raw)
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError("raw RPC request must be a JSON object")
+    missing = [field for field in ("id", "src", "method") if field not in value]
+    if missing:
+        raise argparse.ArgumentTypeError(
+            "raw RPC request is missing required field(s): " + ", ".join(missing)
+        )
+    if not isinstance(value["method"], str) or not value["method"]:
+        raise argparse.ArgumentTypeError("raw RPC request method must be a string")
+    return value
+
+
+def automatic_params(method: str, params: Any | None) -> Any | None:
+    """Supply the conventional component id while keeping system RPCs bare."""
+    namespace, separator, _ = method.partition(".")
+    if not separator or namespace in NON_COMPONENT_NAMESPACES:
+        return params
+    if params is None:
+        return {"id": 0}
+    if isinstance(params, dict) and "id" not in params:
+        return {"id": 0, **params}
+    return params
+
+
 def build_request(method: str, params: Any | None) -> tuple[dict[str, Any], bytes]:
+    params = automatic_params(method, params)
     request: dict[str, Any] = {
         "id": REQUEST_ID,
         "src": RPC_SOURCE,
@@ -64,6 +105,13 @@ def build_request(method: str, params: Any | None) -> tuple[dict[str, Any], byte
 
     # The frame length is the number of UTF-8 bytes, not the number of JSON
     # characters. Compact JSON also keeps the BLE payload as small as possible.
+    payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return request, payload
+
+
+def build_raw_request(request: dict[str, Any]) -> tuple[dict[str, Any], bytes]:
     payload = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode(
         "utf-8"
     )
@@ -91,6 +139,14 @@ def status_cell(value: str) -> Text:
     return Text(value, style=style)
 
 
+def paired_label(value: bool | None) -> str:
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    return "unknown"
+
+
 async def resolve_device_name(
     address: str, timeout: float
 ) -> str | None:
@@ -111,8 +167,17 @@ async def resolve_device_name(
     return name.strip() if isinstance(name, str) and name.strip() else None
 
 
+def locally_paired(device: Any) -> bool | None:
+    """Return the backend's local bond state when it exposes one."""
+    details = getattr(device, "details", {})
+    properties = details.get("props") if isinstance(details, dict) else None
+    if not isinstance(properties, dict) or "Paired" not in properties:
+        return None
+    return bool(properties["Paired"])
+
+
 async def scan_shelly_devices(
-    timeout: float, *, resolve_names: bool, concurrency: int
+    timeout: float, *, resolve_names: bool, concurrency: int, force: bool
 ) -> list[dict[str, str]]:
     LOG.info("Scanning for Shelly BLE devices for %.1f seconds", timeout)
     discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
@@ -132,6 +197,7 @@ async def scan_shelly_devices(
             "address": address,
             "name": name,
             "rssi": str(advertisement.rssi),
+            "paired": paired_label(locally_paired(device)),
             "rpc": (
                 "yes" if RPC_SERVICE_UUID.lower() in service_uuids else "unknown"
             ),
@@ -146,6 +212,13 @@ async def scan_shelly_devices(
                 row["name"].lower().startswith("shelly") or row["rpc"] == "yes"
             ):
                 return
+            if not force and row["paired"] != "yes":
+                LOG.debug(
+                    "Skipping name lookup for %s: device is not locally paired "
+                    "(use --force to connect anyway)",
+                    row["address"],
+                )
+                return
             async with semaphore:
                 resolved_name = await resolve_device_name(
                     row["address"], min(timeout, 3.0)
@@ -159,7 +232,7 @@ async def scan_shelly_devices(
 
 
 def print_scan_results(rows: list[dict[str, str]], *, tsv: bool) -> None:
-    fields = ("address", "name", "rssi", "rpc")
+    fields = ("address", "name", "rssi", "rpc", "paired")
     headers = tuple(field.upper() for field in fields)
     if tsv:
         print("\t".join(headers))
@@ -184,9 +257,14 @@ def print_scan_results(rows: list[dict[str, str]], *, tsv: bool) -> None:
     table.add_column("NAME", style="green")
     table.add_column("RSSI", style="magenta")
     table.add_column("RPC", style="white")
+    table.add_column("PAIRED", style="white")
     for row in rows:
         table.add_row(
-            row["address"], row["name"], row["rssi"], status_cell(row["rpc"])
+            row["address"],
+            row["name"],
+            row["rssi"],
+            status_cell(row["rpc"]),
+            status_cell(row["paired"]),
         )
     CONSOLE.print(table)
 
@@ -201,8 +279,11 @@ def frame_length(raw: bytes | bytearray, *, label: str) -> int:
 
 def mtu_write_size(client: BleakClient) -> int:
     # ATT write requests have three bytes of protocol overhead. Keep the
-    # fallback useful for platforms that do not report a negotiated MTU.
-    mtu = getattr(client, "mtu_size", 23) or 23
+    # fallback useful for platforms that do not report a negotiated MTU. Read
+    # Bleak's backend value directly so its warning-producing fallback property
+    # is not touched when BlueZ has not acquired an MTU.
+    backend = getattr(client, "_backend", None)
+    mtu = getattr(backend, "_mtu_size", None) or 23
     return max(1, min(512, mtu - 3))
 
 
@@ -271,7 +352,9 @@ async def call_rpc(
         await client.connect()
         if not client.is_connected:
             raise ShellyBleRpcError("BLE client reported a failed connection")
-        LOG.debug("Connected; negotiated MTU: %s", getattr(client, "mtu_size", "unknown"))
+        backend = getattr(client, "_backend", None)
+        mtu = getattr(backend, "_mtu_size", None) or "default 23"
+        LOG.debug("Connected; negotiated MTU: %s", mtu)
 
         try:
             service = client.services.get_service(RPC_SERVICE_UUID)
@@ -570,6 +653,11 @@ def argument_parser() -> argparse.ArgumentParser:
         help="also query devices for configured human-readable names",
     )
     scan_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="allow --full name lookups for unpaired or unknown devices",
+    )
+    scan_parser.add_argument(
         "--concurrency",
         type=int,
         default=4,
@@ -585,13 +673,21 @@ def argument_parser() -> argparse.ArgumentParser:
         "address", help="BLE MAC address or platform device address"
     )
     rpc_parser.add_argument(
-        "method", help="Shelly RPC method, e.g. Shelly.GetDeviceInfo"
+        "method",
+        nargs="?",
+        help="Shelly RPC method, e.g. Shelly.GetDeviceInfo (omit with --raw)",
     )
     rpc_parser.add_argument(
         "params",
         nargs="?",
         type=parse_json_params,
         help="optional JSON RPC params, e.g. '{\"id\":0}'",
+    )
+    rpc_parser.add_argument(
+        "--raw",
+        type=parse_raw_request,
+        metavar="JSON",
+        help="send a complete raw JSON RPC request, including id, src, and method",
     )
     rpc_parser.add_argument(
         "--timeout",
@@ -671,6 +767,7 @@ def main() -> int:
                     args.timeout,
                     resolve_names=args.full,
                     concurrency=args.concurrency,
+                    force=args.force,
                 )
             )
         except (BleakError, OSError) as exc:
@@ -706,7 +803,14 @@ def main() -> int:
             return 1
         return 0
 
-    request, payload = build_request(args.method, args.params)
+    if args.raw is not None:
+        if args.method is not None or args.params is not None:
+            argument_parser().error("--raw cannot be combined with method or params")
+        request, payload = build_raw_request(args.raw)
+    else:
+        if args.method is None:
+            argument_parser().error("method is required unless --raw is used")
+        request, payload = build_request(args.method, args.params)
 
     try:
         response = asyncio.run(

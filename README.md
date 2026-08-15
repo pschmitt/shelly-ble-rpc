@@ -10,9 +10,12 @@ uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 uv run shelly_ble_rpc.py pair E8:F6:0A:66:D3:92
 uv run shelly_ble_rpc.py unpair E8:F6:0A:66:D3:92
 uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Switch.Set '{"id":0,"on":true}'
+uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Switch.GetConfig
+uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 --raw '{"id":7,"src":"my-cli","method":"Switch.GetConfig","params":{"id":1}}'
 uv run shelly_ble_rpc.py rpc --debug E8:F6:0A:66:D3:92 Shelly.GetDeviceInfo
 uv run shelly_ble_rpc.py scan --timeout 5
 uv run shelly_ble_rpc.py scan --full
+uv run shelly_ble_rpc.py scan --full --force
 uv run shelly_ble_rpc.py scan --tsv
 ./shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 
@@ -23,17 +26,28 @@ nix run . -- rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 nix run . -- scan
 ```
 
-The optional third positional argument is JSON RPC `params`. The response
-frame is printed as formatted JSON. A device-side RPC error is printed and
-returns a non-zero exit status.
+The CLI automatically adds `{"id":0}` to component RPC params when no
+component id is supplied. The RPC envelope always includes a request `id` and
+`src` value. The optional third positional argument overrides
+or extends those automatic component params; quote it so your shell passes the
+JSON as one argument. For example, `Switch.GetConfig` works without extra
+arguments and targets component 0 by default.
+
+Use `--raw` to provide the complete JSON RPC request manually, including its
+`id`, `src`, `method`, and optional `params`; it disables all automatic fields.
+The response frame is printed as formatted JSON. A device-side RPC error is
+printed and returns a non-zero exit status.
 
 `scan` prints a colored Rich table with one row per discovered Shelly device
-(`ADDRESS`, advertised `NAME`, `RSSI`, and whether `RPC` was advertised).
-Status values such as `yes` and `unknown` are colored semantically. Use
+(`ADDRESS`, advertised `NAME`, `RSSI`, whether `RPC` was advertised, and local
+`PAIRED` state). Status values such as `yes`, `no`, and `unknown` are colored
+semantically. Use
 `scan --full` to additionally make best-effort read-only `Sys.GetConfig`
 requests for configured human-readable names. Full-mode lookups run in
 parallel, capped at four connections by default; adjust this with
-`--concurrency` if needed.
+`--concurrency` if needed. By default, full mode connects only to devices that
+the local Bluetooth backend reports as paired; use `scan --full --force` to
+allow connections to unpaired or unknown devices.
 
 Use the separate `pair ADDRESS_OR_NAME` action when the device requires BLE
 bonding; it accepts a MAC address in any letter case or the advertised device
