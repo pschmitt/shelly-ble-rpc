@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["bleak>=0.22", "rich>=13", "rich-argparse>=1"]
+# dependencies = ["bleak>=1.0", "rich>=13", "rich-argparse>=1"]
 # ///
 
 """Send one Shelly Gen2+ RPC request over the device's BLE GATT RPC service."""
@@ -89,10 +89,12 @@ def status_cell(value: str) -> Text:
     return Text(value, style=style)
 
 
-async def resolve_device_name(address: str, timeout: float) -> str | None:
+async def resolve_device_name(
+    address: str, timeout: float, *, pair: bool
+) -> str | None:
     request, payload = build_request("Sys.GetConfig", None)
     try:
-        response = await call_rpc(address, request, payload, timeout)
+        response = await call_rpc(address, request, payload, timeout, pair=pair)
     except (BleakError, OSError, ShellyBleRpcError, asyncio.TimeoutError) as exc:
         LOG.debug("Could not resolve the configured name for %s: %s", address, exc)
         return None
@@ -108,7 +110,7 @@ async def resolve_device_name(address: str, timeout: float) -> str | None:
 
 
 async def scan_shelly_devices(
-    timeout: float, *, resolve_names: bool, concurrency: int
+    timeout: float, *, resolve_names: bool, concurrency: int, pair: bool
 ) -> list[dict[str, str]]:
     LOG.info("Scanning for Shelly BLE devices for %.1f seconds", timeout)
     discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
@@ -144,7 +146,7 @@ async def scan_shelly_devices(
                 return
             async with semaphore:
                 resolved_name = await resolve_device_name(
-                    row["address"], min(timeout, 3.0)
+                    row["address"], min(timeout, 3.0), pair=pair
                 )
             if resolved_name:
                 row["name"] = resolved_name
@@ -253,9 +255,14 @@ async def read_frame(
 
 
 async def call_rpc(
-    address: str, request: dict[str, Any], payload: bytes, timeout: float
+    address: str,
+    request: dict[str, Any],
+    payload: bytes,
+    timeout: float,
+    *,
+    pair: bool = False,
 ) -> dict[str, Any]:
-    client = BleakClient(address, timeout=timeout)
+    client = BleakClient(address, timeout=timeout, pair=pair)
     try:
         LOG.info("Connecting directly to %s", address)
         # Bleak applies its constructor timeout to connection and service
@@ -371,6 +378,11 @@ def argument_parser() -> argparse.ArgumentParser:
         default=4,
         help="maximum parallel name lookups in --full mode (default: 4)",
     )
+    scan_parser.add_argument(
+        "--pair",
+        action="store_true",
+        help="pair with devices before --full name lookups",
+    )
 
     rpc_parser = actions.add_parser(
         "rpc",
@@ -402,6 +414,11 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable BLE and protocol debug logging",
     )
+    rpc_parser.add_argument(
+        "--pair",
+        action="store_true",
+        help="pair with the device before connecting",
+    )
     return parser
 
 
@@ -426,6 +443,7 @@ def main() -> int:
                     args.timeout,
                     resolve_names=args.full,
                     concurrency=args.concurrency,
+                    pair=args.pair,
                 )
             )
         except (BleakError, OSError) as exc:
@@ -439,7 +457,9 @@ def main() -> int:
     request, payload = build_request(args.method, args.params)
 
     try:
-        response = asyncio.run(call_rpc(args.address, request, payload, args.timeout))
+        response = asyncio.run(
+            call_rpc(args.address, request, payload, args.timeout, pair=args.pair)
+        )
     except asyncio.TimeoutError:
         LOG.error(
             "Timed out after %.1f seconds while connecting or waiting for the RPC response",
