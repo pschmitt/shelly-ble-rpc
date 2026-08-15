@@ -35,6 +35,8 @@ RPC_TX_CONTROL_UUID = "5f6d4f53-5f52-5043-5f74-785f63746c5f"
 RPC_RX_CONTROL_UUID = "5f6d4f53-5f52-5043-5f72-785f63746c5f"
 
 DEFAULT_TIMEOUT = 15.0
+PAIR_ATTEMPTS = 2
+PAIR_RETRY_DELAY = 1.0
 REQUEST_ID = 1
 RPC_SOURCE = "shelly_ble_rpc"
 MAC_ADDRESS_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
@@ -424,21 +426,41 @@ async def pair_device(address: str, timeout: float) -> None:
     target = await resolve_device_target(address, timeout)
     target_address = getattr(target, "address", target)
     pairing_agent = await register_pairing_agent(str(target_address))
-    client: BleakClient | None = None
     try:
-        client = BleakClient(target, timeout=timeout, pair=True)
-        LOG.info("Pairing with %s", address)
-        await client.connect()
-        if not client.is_connected:
-            raise ShellyBleRpcError("BLE client reported a failed pairing connection")
-        LOG.info("Pairing completed for %s", address)
-    finally:
-        if client is not None and client.is_connected:
-            LOG.debug("Disconnecting from %s", address)
+        for attempt in range(1, PAIR_ATTEMPTS + 1):
+            client = BleakClient(target, timeout=timeout, pair=True)
             try:
-                await client.disconnect()
-            except Exception as exc:  # noqa: BLE001 - cleanup must not hide the result
-                LOG.debug("BLE disconnect failed: %s", exc)
+                LOG.info(
+                    "Pairing with %s%s",
+                    address,
+                    f" (attempt {attempt}/{PAIR_ATTEMPTS})" if attempt > 1 else "",
+                )
+                await client.connect()
+                if not client.is_connected:
+                    raise ShellyBleRpcError(
+                        "BLE client reported a failed pairing connection"
+                    )
+                LOG.info("Pairing completed for %s", address)
+                return
+            except (BleakError, OSError, ShellyBleRpcError, asyncio.TimeoutError) as exc:
+                if attempt == PAIR_ATTEMPTS:
+                    raise
+                LOG.warning(
+                    "Pairing attempt %d/%d failed: %s; retrying in %.1f seconds",
+                    attempt,
+                    PAIR_ATTEMPTS,
+                    exc,
+                    PAIR_RETRY_DELAY,
+                )
+                await asyncio.sleep(PAIR_RETRY_DELAY)
+            finally:
+                if client.is_connected:
+                    LOG.debug("Disconnecting from %s", address)
+                    try:
+                        await client.disconnect()
+                    except Exception as exc:  # noqa: BLE001 - cleanup must not hide the result
+                        LOG.debug("BLE disconnect failed: %s", exc)
+    finally:
         if pairing_agent is not None:
             await pairing_agent.close()
 
