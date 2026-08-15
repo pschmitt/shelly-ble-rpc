@@ -17,11 +17,13 @@ uv run shelly_ble_rpc.py scan --timeout 5
 uv run shelly_ble_rpc.py scan --full
 uv run shelly_ble_rpc.py scan --full --force
 uv run shelly_ble_rpc.py scan --tsv
+uv run shelly_ble_rpc.py paired
 ./shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 
 nix develop
 nix run . -- pair E8:F6:0A:66:D3:92
 nix run . -- unpair E8:F6:0A:66:D3:92
+nix run . -- paired
 nix run . -- rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 nix run . -- scan
 ```
@@ -48,6 +50,10 @@ parallel, capped at four connections by default; adjust this with
 `--concurrency` if needed. By default, full mode connects only to devices that
 the local Bluetooth backend reports as paired; use `scan --full --force` to
 allow connections to unpaired or unknown devices.
+
+Use `paired` to list all locally bonded Shelly devices, including devices that
+are not currently advertising. This command currently uses the Linux/BlueZ
+bond database.
 
 Use the separate `pair ADDRESS_OR_NAME` action when the device requires BLE
 bonding; it accepts a MAC address in any letter case or the advertised device

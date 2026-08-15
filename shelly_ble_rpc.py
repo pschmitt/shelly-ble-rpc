@@ -35,6 +35,8 @@ RPC_TX_CONTROL_UUID = "5f6d4f53-5f52-5043-5f74-785f63746c5f"
 RPC_RX_CONTROL_UUID = "5f6d4f53-5f52-5043-5f72-785f63746c5f"
 
 DEFAULT_TIMEOUT = 15.0
+NAME_LOOKUP_RETRIES = 3
+NAME_LOOKUP_RETRY_DELAY = 1.0
 PAIR_ATTEMPTS = 2
 PAIR_RETRY_DELAY = 1.0
 REQUEST_ID = 1
@@ -178,6 +180,87 @@ def locally_paired(device: Any) -> bool | None:
     return bool(properties["Paired"])
 
 
+def unwrap_dbus_value(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+async def list_paired_shelly_devices() -> list[dict[str, str]]:
+    """List Shelly devices in the local Linux/BlueZ bond database."""
+    if not sys.platform.startswith("linux"):
+        raise NotImplementedError
+    try:
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+    except ImportError as exc:
+        raise ShellyBleRpcError(
+            "Linux paired-device listing requires the dbus-fast package"
+        ) from exc
+
+    bus = MessageBus(bus_type=BusType.SYSTEM)
+    await bus.connect()
+    try:
+        reply = await bus.call(
+            Message(
+                destination="org.bluez",
+                path="/",
+                interface="org.freedesktop.DBus.ObjectManager",
+                member="GetManagedObjects",
+            )
+        )
+        if reply.message_type == MessageType.ERROR:
+            raise ShellyBleRpcError(
+                f"could not read the BlueZ paired-device database: {reply.error_name}"
+            )
+
+        rows: list[dict[str, str]] = []
+        for _, interfaces in reply.body[0].items():
+            raw_device = interfaces.get("org.bluez.Device1")
+            if not isinstance(raw_device, dict):
+                continue
+            device = {
+                key: unwrap_dbus_value(value) for key, value in raw_device.items()
+            }
+            if device.get("Paired") is not True:
+                continue
+
+            address = device.get("Address")
+            if not isinstance(address, str):
+                continue
+            service_uuids = {
+                str(uuid).lower() for uuid in device.get("UUIDs", [])
+            }
+            manufacturer_data = device.get("ManufacturerData") or {}
+            name = device.get("Name") or device.get("Alias") or ""
+            is_shelly = (
+                (
+                    isinstance(name, str)
+                    and name.lower().startswith("shelly")
+                )
+                or RPC_SERVICE_UUID.lower() in service_uuids
+                or 0x0BA9 in manufacturer_data
+            )
+            if not is_shelly:
+                continue
+            rows.append(
+                {
+                    "address": address,
+                    "name": str(name),
+                    "rssi": str(device.get("RSSI", "unknown")),
+                    "rpc": (
+                        "yes"
+                        if RPC_SERVICE_UUID.lower() in service_uuids
+                        else "unknown"
+                    ),
+                    "paired": "yes",
+                }
+            )
+        return sorted(
+            rows, key=lambda row: (row["name"].lower(), row["address"].lower())
+        )
+    finally:
+        bus.disconnect()
+
+
 async def scan_shelly_devices(
     timeout: float, *, resolve_names: bool, concurrency: int, force: bool
 ) -> list[dict[str, str]]:
@@ -209,26 +292,59 @@ async def scan_shelly_devices(
     if resolve_names:
         semaphore = asyncio.Semaphore(concurrency)
 
-        async def resolve_row(row: dict[str, str]) -> None:
+        def eligible_for_name_lookup(row: dict[str, str]) -> bool:
             if not (
                 row["name"].lower().startswith("shelly") or row["rpc"] == "yes"
             ):
-                return
+                return False
             if not force and row["paired"] != "yes":
                 LOG.debug(
                     "Skipping name lookup for %s: device is not locally paired "
                     "(use --force to connect anyway)",
                     row["address"],
                 )
-                return
+                return False
+            return True
+
+        async def resolve_row(row: dict[str, str]) -> bool:
+            if not eligible_for_name_lookup(row):
+                return False
             async with semaphore:
                 resolved_name = await resolve_device_name(
                     row["address"], min(timeout, 3.0)
                 )
             if resolved_name:
                 row["name"] = resolved_name
+                return True
+            return False
 
-        await asyncio.gather(*(resolve_row(row) for row in rows))
+        results = await asyncio.gather(*(resolve_row(row) for row in rows))
+        retry_rows = [
+            row
+            for row, resolved in zip(rows, results)
+            if not resolved and eligible_for_name_lookup(row)
+        ]
+        if retry_rows:
+            LOG.debug(
+                "Retrying %d unresolved name lookup(s) serially", len(retry_rows)
+            )
+            for row in retry_rows:
+                for attempt in range(1, NAME_LOOKUP_RETRIES + 1):
+                    resolved_name = await resolve_device_name(
+                        row["address"], min(timeout, 3.0)
+                    )
+                    if resolved_name:
+                        row["name"] = resolved_name
+                        break
+                    if attempt < NAME_LOOKUP_RETRIES:
+                        LOG.debug(
+                            "Name lookup retry %d/%d for %s in %.1f seconds",
+                            attempt,
+                            NAME_LOOKUP_RETRIES,
+                            row["address"],
+                            NAME_LOOKUP_RETRY_DELAY,
+                        )
+                        await asyncio.sleep(NAME_LOOKUP_RETRY_DELAY)
 
     return sorted(rows, key=lambda row: (row["name"].lower(), row["address"].lower()))
 
@@ -685,6 +801,23 @@ def argument_parser() -> argparse.ArgumentParser:
         default=4,
         help="maximum parallel name lookups in --full mode (default: 4)",
     )
+    paired_parser = actions.add_parser(
+        "paired",
+        help="list paired Shelly BLE devices",
+        description="List paired Shelly BLE devices from the local Linux/BlueZ bond database.",
+        formatter_class=RichHelpFormatter,
+    )
+    paired_parser.add_argument(
+        "--tsv",
+        action="store_true",
+        help="emit raw tab-separated values instead of the colored table",
+    )
+    paired_parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="enable BlueZ paired-device debug logging",
+    )
     rpc_parser = actions.add_parser(
         "rpc",
         help="send an RPC method",
@@ -770,7 +903,7 @@ def argument_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = argument_parser().parse_args()
-    if args.timeout <= 0:
+    if hasattr(args, "timeout") and args.timeout <= 0:
         argument_parser().error("--timeout must be greater than zero")
     if args.action == "scan" and args.concurrency <= 0:
         argument_parser().error("--concurrency must be greater than zero")
@@ -798,6 +931,20 @@ def main() -> int:
         print_scan_results(rows, tsv=args.tsv)
         if not rows:
             LOG.info("No Shelly BLE devices found")
+        return 0
+
+    if args.action == "paired":
+        try:
+            rows = asyncio.run(list_paired_shelly_devices())
+        except NotImplementedError:
+            LOG.error("Listing paired BLE devices is only supported on Linux/BlueZ")
+            return 1
+        except (BleakError, OSError, ShellyBleRpcError) as exc:
+            LOG.error("Could not list paired Shelly BLE devices: %s", exc)
+            return 1
+        print_scan_results(rows, tsv=args.tsv)
+        if not rows:
+            LOG.info("No paired Shelly BLE devices found")
         return 0
 
     if args.action == "pair":
