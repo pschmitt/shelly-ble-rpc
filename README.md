@@ -65,6 +65,16 @@ by Bleak on Linux and Windows.
 Use `--tsv` for a clean tab-separated header and rows suitable for piping into
 a table viewer such as `tv`/`tvtool`.
 
+Shell completions are included for Bash and Zsh. Nix installs them
+automatically; for a checkout used directly with the Python entry point, source
+the matching file from `completions/`. Device completion queries locally paired
+devices, and RPC method completion includes the common Shelly methods.
+
+```console
+source completions/shelly-ble-rpc.bash       # Bash
+source completions/_shelly-ble-rpc            # Zsh
+```
+
 Firmware 1.7.x is the initial target: BLE RPC must be enabled and no BLE
 bonding is attempted. Shelly firmware 2.0.0 and newer requires pairing for
 BLE RPC outside the provisioning window.

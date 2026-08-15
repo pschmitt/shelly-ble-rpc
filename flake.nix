@@ -26,10 +26,25 @@
           ]);
         in
         {
-          default = pkgs.writeShellApplication {
-            name = "shelly-ble-rpc";
-            text = ''
-              exec ${python}/bin/python ${./shelly_ble_rpc.py} "$@"
+          default = pkgs.stdenv.mkDerivation {
+            pname = "shelly-ble-rpc";
+            version = "0.1.0";
+            dontUnpack = true;
+
+            nativeBuildInputs = [
+              pkgs.installShellFiles
+              pkgs.makeWrapper
+            ];
+
+            installPhase = ''
+              install -Dm755 ${./shelly_ble_rpc.py} $out/libexec/shelly_ble_rpc.py
+              makeWrapper ${python}/bin/python $out/bin/shelly-ble-rpc \
+                --add-flags $out/libexec/shelly_ble_rpc.py
+
+              installShellCompletion --bash --name shelly-ble-rpc.bash \
+                ${./completions/shelly-ble-rpc.bash}
+              installShellCompletion --zsh --name _shelly-ble-rpc \
+                ${./completions/_shelly-ble-rpc}
             '';
           };
         }

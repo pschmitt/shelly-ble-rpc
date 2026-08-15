@@ -1,0 +1,109 @@
+#compdef shelly-ble-rpc shelly_ble_rpc.py
+
+_shelly_ble_rpc_methods=(
+    'Shelly.GetDeviceInfo:Shelly device information'
+    'Shelly.GetStatus:Shelly device status'
+    'Shelly.GetConfig:Shelly device configuration'
+    'Shelly.Reboot:reboot the device'
+    'Shelly.Update:update device firmware'
+    'Sys.GetConfig:system configuration'
+    'Sys.GetStatus:system status'
+    'Switch.GetConfig:switch configuration'
+    'Switch.GetStatus:switch status'
+    'Switch.Set:set switch state'
+    'Switch.Toggle:toggle switch state'
+    'Light.GetConfig:light configuration'
+    'Light.GetStatus:light status'
+    'Light.Set:set light state'
+    'Light.Toggle:toggle light state'
+    'Cover.GetConfig:cover configuration'
+    'Cover.GetStatus:cover status'
+    'Cover.Open:open cover'
+    'Cover.Close:close cover'
+    'Cover.Stop:stop cover'
+    'Cover.GoTo:move cover to position'
+    'Input.GetConfig:input configuration'
+    'Input.GetStatus:input status'
+    'Input.SetConfig:set input configuration'
+    'Script.GetConfig:script configuration'
+    'Script.GetStatus:script status'
+    'Script.Start:start script'
+    'Script.Stop:stop script'
+    'MQTT.GetConfig:MQTT configuration'
+    'BLE.GetConfig:BLE configuration'
+    'Cloud.GetConfig:cloud configuration'
+    'WiFi.GetConfig:Wi-Fi configuration'
+)
+_shelly_ble_rpc_actions=(
+    'scan:list nearby Shelly BLE devices'
+    'paired:list paired Shelly BLE devices'
+    'rpc:send an RPC method'
+    'pair:pair with a BLE device'
+    'unpair:remove a BLE device bond'
+)
+
+_shelly_ble_rpc_devices() {
+    local command_name=${words[1]}
+    local address name rest header=1
+    local -a devices=()
+
+    while IFS=$'\t' read -r address name rest; do
+        if ((header)); then
+            header=0
+            continue
+        fi
+        [[ -n "$address" ]] && devices+=("$address")
+        [[ -n "$name" ]] && devices+=("$name")
+    done < <("$command_name" paired --tsv 2>/dev/null)
+    compadd -- "${devices[@]}"
+}
+
+_shelly_ble_rpc() {
+    local action
+
+    if ((CURRENT == 2)); then
+        _describe 'action' _shelly_ble_rpc_actions
+        return
+    fi
+
+    action=${words[2]}
+    case "$action" in
+        rpc)
+            _arguments \
+                '1:device:_shelly_ble_rpc_devices' \
+                '2:RPC method:_describe "RPC method" _shelly_ble_rpc_methods' \
+                '3:JSON params:' \
+                '--raw[send a complete raw JSON request]:JSON:' \
+                '--timeout[connection and RPC timeout]:seconds:' \
+                '(-d --debug)'{-d,--debug}'[enable debug logging]'
+            ;;
+        pair)
+            _arguments \
+                '1:device:_shelly_ble_rpc_devices' \
+                '--timeout[pairing timeout]:seconds:' \
+                '(-d --debug)'{-d,--debug}'[enable debug logging]'
+            ;;
+        unpair)
+            _arguments \
+                '1:device:_shelly_ble_rpc_devices' \
+                '--timeout[device lookup timeout]:seconds:' \
+                '(-d --debug)'{-d,--debug}'[enable debug logging]'
+            ;;
+        scan)
+            _arguments \
+                '--timeout[scan duration]:seconds:' \
+                '--tsv[emit raw tab-separated values]' \
+                '--full[resolve configured device names]' \
+                '--force[connect to unpaired devices]' \
+                '--concurrency[parallel name lookups]:connections:' \
+                '(-d --debug)'{-d,--debug}'[enable debug logging]'
+            ;;
+        paired)
+            _arguments \
+                '--tsv[emit raw tab-separated values]' \
+                '(-d --debug)'{-d,--debug}'[enable debug logging]'
+            ;;
+    esac
+}
+
+_shelly_ble_rpc "$@"
