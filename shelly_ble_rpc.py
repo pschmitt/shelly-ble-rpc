@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import struct
 import sys
 from typing import Any
@@ -36,6 +37,7 @@ RPC_RX_CONTROL_UUID = "5f6d4f53-5f52-5043-5f72-785f63746c5f"
 DEFAULT_TIMEOUT = 15.0
 REQUEST_ID = 1
 RPC_SOURCE = "shelly_ble_rpc"
+MAC_ADDRESS_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
 
 
 class ShellyBleRpcError(RuntimeError):
@@ -90,11 +92,11 @@ def status_cell(value: str) -> Text:
 
 
 async def resolve_device_name(
-    address: str, timeout: float, *, pair: bool
+    address: str, timeout: float
 ) -> str | None:
     request, payload = build_request("Sys.GetConfig", None)
     try:
-        response = await call_rpc(address, request, payload, timeout, pair=pair)
+        response = await call_rpc(address, request, payload, timeout)
     except (BleakError, OSError, ShellyBleRpcError, asyncio.TimeoutError) as exc:
         LOG.debug("Could not resolve the configured name for %s: %s", address, exc)
         return None
@@ -110,7 +112,7 @@ async def resolve_device_name(
 
 
 async def scan_shelly_devices(
-    timeout: float, *, resolve_names: bool, concurrency: int, pair: bool
+    timeout: float, *, resolve_names: bool, concurrency: int
 ) -> list[dict[str, str]]:
     LOG.info("Scanning for Shelly BLE devices for %.1f seconds", timeout)
     discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
@@ -146,7 +148,7 @@ async def scan_shelly_devices(
                 return
             async with semaphore:
                 resolved_name = await resolve_device_name(
-                    row["address"], min(timeout, 3.0), pair=pair
+                    row["address"], min(timeout, 3.0)
                 )
             if resolved_name:
                 row["name"] = resolved_name
@@ -259,10 +261,8 @@ async def call_rpc(
     request: dict[str, Any],
     payload: bytes,
     timeout: float,
-    *,
-    pair: bool = False,
 ) -> dict[str, Any]:
-    client = BleakClient(address, timeout=timeout, pair=pair)
+    client = BleakClient(address, timeout=timeout)
     try:
         LOG.info("Connecting directly to %s", address)
         # Bleak applies its constructor timeout to connection and service
@@ -337,6 +337,187 @@ async def call_rpc(
                 LOG.debug("BLE disconnect failed: %s", exc)
 
 
+async def pair_device(address: str, timeout: float) -> None:
+    target = await resolve_pair_target(address, timeout)
+    target_address = getattr(target, "address", target)
+    pairing_agent = await register_pairing_agent(str(target_address))
+    client: BleakClient | None = None
+    try:
+        client = BleakClient(target, timeout=timeout, pair=True)
+        LOG.info("Pairing with %s", address)
+        await client.connect()
+        if not client.is_connected:
+            raise ShellyBleRpcError("BLE client reported a failed pairing connection")
+        LOG.info("Pairing completed for %s", address)
+    finally:
+        if client is not None and client.is_connected:
+            LOG.debug("Disconnecting from %s", address)
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001 - cleanup must not hide the result
+                LOG.debug("BLE disconnect failed: %s", exc)
+        if pairing_agent is not None:
+            await pairing_agent.close()
+
+
+def is_mac_address(value: str) -> bool:
+    return bool(MAC_ADDRESS_RE.fullmatch(value))
+
+
+def normalized_mac_address(value: str) -> str:
+    return value.upper()
+
+
+async def resolve_pair_target(identifier: str, timeout: float) -> Any:
+    """Resolve a pair action's MAC address or advertised device name."""
+    if is_mac_address(identifier):
+        return normalized_mac_address(identifier)
+
+    LOG.info("Scanning for BLE device named %s for %.1f seconds", identifier, timeout)
+    discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
+    matches: list[Any] = []
+    wanted_name = identifier.casefold()
+    for device, advertisement in discovered.values():
+        names = {
+            value.casefold()
+            for value in (advertisement.local_name, device.name)
+            if isinstance(value, str) and value
+        }
+        if wanted_name in names:
+            matches.append(device)
+
+    if not matches:
+        raise ShellyBleRpcError(f"no BLE device named {identifier!r} was found")
+    if len(matches) > 1:
+        addresses = ", ".join(str(device.address) for device in matches)
+        raise ShellyBleRpcError(
+            f"device name {identifier!r} is ambiguous; matches: {addresses}"
+        )
+    return matches[0]
+
+
+async def register_pairing_agent(address: str) -> Any | None:
+    """Register a temporary Linux BlueZ agent for Shelly's Just Works pairing."""
+    if not sys.platform.startswith("linux"):
+        return None
+
+    try:
+        from dbus_fast import BusType, Message, MessageType
+        from dbus_fast.aio import MessageBus
+        from dbus_fast.errors import DBusError
+        from dbus_fast.service import ServiceInterface, method
+    except ImportError as exc:
+        raise ShellyBleRpcError(
+            "Linux BLE pairing requires the dbus-fast package"
+        ) from exc
+
+    agent_path = "/com/shelly_ble_rpc/agent"
+    wanted_device = f"/dev_{address.replace(':', '_')}".casefold()
+
+    class ShellyPairingAgent(ServiceInterface):
+        def __init__(self) -> None:
+            super().__init__("org.bluez.Agent1")
+
+        def check_device(self, device: str) -> None:
+            if not device.casefold().endswith(wanted_device):
+                raise DBusError(
+                    "org.bluez.Error.Rejected",
+                    "pairing request is for a different device",
+                )
+
+        @method()
+        def Release(self) -> "":
+            return None
+
+        @method()
+        def RequestPinCode(self, device: "o") -> "s":
+            self.check_device(device)
+            raise DBusError(
+                "org.bluez.Error.Rejected", "Shelly pairing does not use a PIN"
+            )
+
+        @method()
+        def DisplayPinCode(self, device: "o", pincode: "s") -> "":
+            self.check_device(device)
+            LOG.debug("BlueZ requested display of pairing PIN %s", pincode)
+            return None
+
+        @method()
+        def RequestPasskey(self, device: "o") -> "u":
+            self.check_device(device)
+            raise DBusError(
+                "org.bluez.Error.Rejected", "Shelly pairing does not use a passkey"
+            )
+
+        @method()
+        def DisplayPasskey(self, device: "o", passkey: "u", entered: "q") -> "":
+            self.check_device(device)
+            LOG.debug("BlueZ requested display of pairing passkey %06d", passkey)
+            return None
+
+        @method()
+        def RequestConfirmation(self, device: "o", passkey: "u") -> "":
+            self.check_device(device)
+            LOG.debug("Automatically confirming Shelly pairing passkey %06d", passkey)
+            return None
+
+        @method()
+        def RequestAuthorization(self, device: "o") -> "":
+            self.check_device(device)
+            return None
+
+        @method()
+        def AuthorizeService(self, device: "o", uuid: "s") -> "":
+            self.check_device(device)
+            LOG.debug("Authorizing Shelly Bluetooth service %s", uuid)
+            return None
+
+        @method()
+        def Cancel(self) -> "":
+            return None
+
+    bus = MessageBus(bus_type=BusType.SYSTEM)
+    await bus.connect()
+    bus.export(agent_path, ShellyPairingAgent())
+    reply = await bus.call(
+        Message(
+            destination="org.bluez",
+            path="/org/bluez",
+            interface="org.bluez.AgentManager1",
+            member="RegisterAgent",
+            signature="os",
+            body=[agent_path, "NoInputNoOutput"],
+        )
+    )
+    if reply.message_type == MessageType.ERROR:
+        bus.disconnect()
+        raise ShellyBleRpcError(
+            f"could not register the BlueZ pairing agent: {reply.error_name}"
+        )
+
+    LOG.debug("Registered temporary BlueZ NoInputNoOutput pairing agent")
+
+    class PairingAgentHandle:
+        async def close(self) -> None:
+            try:
+                reply = await bus.call(
+                    Message(
+                        destination="org.bluez",
+                        path="/org/bluez",
+                        interface="org.bluez.AgentManager1",
+                        member="UnregisterAgent",
+                        signature="o",
+                        body=[agent_path],
+                    )
+                )
+                if reply.message_type == MessageType.ERROR:
+                    LOG.debug("Could not unregister BlueZ pairing agent: %s", reply)
+            finally:
+                bus.disconnect()
+
+    return PairingAgentHandle()
+
+
 def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Send Shelly Gen2+ RPC commands over BLE.",
@@ -378,12 +559,6 @@ def argument_parser() -> argparse.ArgumentParser:
         default=4,
         help="maximum parallel name lookups in --full mode (default: 4)",
     )
-    scan_parser.add_argument(
-        "--pair",
-        action="store_true",
-        help="pair with devices before --full name lookups",
-    )
-
     rpc_parser = actions.add_parser(
         "rpc",
         help="send an RPC method",
@@ -414,10 +589,26 @@ def argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="enable BLE and protocol debug logging",
     )
-    rpc_parser.add_argument(
-        "--pair",
+    pair_parser = actions.add_parser(
+        "pair",
+        help="pair with a BLE device",
+        description="Pair with a BLE device by MAC address or advertised name, then disconnect.",
+        formatter_class=RichHelpFormatter,
+    )
+    pair_parser.add_argument(
+        "address", help="BLE MAC address (any letter case) or advertised device name"
+    )
+    pair_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="pairing timeout in seconds (default: 60)",
+    )
+    pair_parser.add_argument(
+        "-d",
+        "--debug",
         action="store_true",
-        help="pair with the device before connecting",
+        help="enable BLE pairing debug logging",
     )
     return parser
 
@@ -443,7 +634,6 @@ def main() -> int:
                     args.timeout,
                     resolve_names=args.full,
                     concurrency=args.concurrency,
-                    pair=args.pair,
                 )
             )
         except (BleakError, OSError) as exc:
@@ -454,11 +644,22 @@ def main() -> int:
             LOG.info("No Shelly BLE devices found")
         return 0
 
+    if args.action == "pair":
+        try:
+            asyncio.run(pair_device(args.address, args.timeout))
+        except asyncio.TimeoutError:
+            LOG.error("Timed out after %.1f seconds while pairing", args.timeout)
+            return 1
+        except (BleakError, OSError, ShellyBleRpcError) as exc:
+            LOG.error("BLE pairing failed: %s", exc)
+            return 1
+        return 0
+
     request, payload = build_request(args.method, args.params)
 
     try:
         response = asyncio.run(
-            call_rpc(args.address, request, payload, args.timeout, pair=args.pair)
+            call_rpc(args.address, request, payload, args.timeout)
         )
     except asyncio.TimeoutError:
         LOG.error(

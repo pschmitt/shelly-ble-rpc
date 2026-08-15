@@ -7,7 +7,7 @@ using [bleak](https://bleak.readthedocs.io/).
 
 ```console
 uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
-uv run shelly_ble_rpc.py rpc --pair E8:F6:0A:66:D3:92 Shelly.GetDeviceInfo
+uv run shelly_ble_rpc.py pair E8:F6:0A:66:D3:92
 uv run shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Switch.Set '{"id":0,"on":true}'
 uv run shelly_ble_rpc.py rpc --debug E8:F6:0A:66:D3:92 Shelly.GetDeviceInfo
 uv run shelly_ble_rpc.py scan --timeout 5
@@ -16,6 +16,7 @@ uv run shelly_ble_rpc.py scan --tsv
 ./shelly_ble_rpc.py rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 
 nix develop
+nix run . -- pair E8:F6:0A:66:D3:92
 nix run . -- rpc E8:F6:0A:66:D3:92 Shelly.Reboot
 nix run . -- scan
 ```
@@ -32,9 +33,11 @@ requests for configured human-readable names. Full-mode lookups run in
 parallel, capped at four connections by default; adjust this with
 `--concurrency` if needed.
 
-Use `rpc --pair` when the device requires BLE bonding. For full scans, use
-`scan --full --pair`; pairing is disabled by default and may require platform
-interaction such as entering a PIN.
+Use the separate `pair ADDRESS_OR_NAME` action when the device requires BLE
+bonding; it accepts a MAC address in any letter case or the advertised device
+name, then pairs and disconnects. Afterwards, `rpc` and `scan --full` can use
+the established bond. Pairing may require platform interaction such as
+entering a PIN.
 Use `--tsv` for a clean tab-separated header and rows suitable for piping into
 a table viewer such as `tv`/`tvtool`.
 
