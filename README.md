@@ -53,7 +53,8 @@ allow connections to unpaired or unknown devices.
 
 Use `paired` to list all locally bonded Shelly devices, including devices that
 are not currently advertising. This command currently uses the Linux/BlueZ
-bond database.
+bond database and prints only the address, cached device name, and paired
+state.
 
 Use the separate `pair ADDRESS_OR_NAME` action when the device requires BLE
 bonding; it accepts a MAC address in any letter case or the advertised device

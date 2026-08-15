@@ -349,8 +349,12 @@ async def scan_shelly_devices(
     return sorted(rows, key=lambda row: (row["name"].lower(), row["address"].lower()))
 
 
-def print_scan_results(rows: list[dict[str, str]], *, tsv: bool) -> None:
+def print_scan_results(
+    rows: list[dict[str, str]], *, tsv: bool, include_radio: bool = True
+) -> None:
     fields = ("address", "name", "rssi", "rpc", "paired")
+    if not include_radio:
+        fields = ("address", "name", "paired")
     headers = tuple(field.upper() for field in fields)
     if tsv:
         print("\t".join(headers))
@@ -373,17 +377,16 @@ def print_scan_results(rows: list[dict[str, str]], *, tsv: bool) -> None:
     )
     table.add_column("ADDRESS", style="cyan", no_wrap=True)
     table.add_column("NAME", style="green")
-    table.add_column("RSSI", style="magenta")
-    table.add_column("RPC", style="white")
+    if include_radio:
+        table.add_column("RSSI", style="magenta")
+        table.add_column("RPC", style="white")
     table.add_column("PAIRED", style="white")
     for row in rows:
-        table.add_row(
-            row["address"],
-            row["name"],
-            row["rssi"],
-            status_cell(row["rpc"]),
-            status_cell(row["paired"]),
-        )
+        values = [row["address"], row["name"]]
+        if include_radio:
+            values.extend((row["rssi"], status_cell(row["rpc"])))
+        values.append(status_cell(row["paired"]))
+        table.add_row(*values)
     CONSOLE.print(table)
 
 
@@ -942,7 +945,7 @@ def main() -> int:
         except (BleakError, OSError, ShellyBleRpcError) as exc:
             LOG.error("Could not list paired Shelly BLE devices: %s", exc)
             return 1
-        print_scan_results(rows, tsv=args.tsv)
+        print_scan_results(rows, tsv=args.tsv, include_radio=False)
         if not rows:
             LOG.info("No paired Shelly BLE devices found")
         return 0
